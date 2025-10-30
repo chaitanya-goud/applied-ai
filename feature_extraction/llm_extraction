@@ -1,1 +1,350 @@
+import os
+import csv
+import re
+import time
+import json
+from pathlib import Path
+from typing import List, Dict, Any
 
+# =========================
+# CONFIG FOR LOCAL (VS CODE)
+# =========================
+# 👉 Change these paths as per your local setup
+RAW_DATA_DIR = r"C:\Users\admin\Documents\4.1\applied ai\Dataset\Rudresh dwivedi"  # Folder containing PDFs
+OUTPUT_DIR = r"C:\Users\admin\Documents\4.1\applied ai\AuthorProfiles"  # Folder for CSV output
+
+# Groq model configuration
+MODEL_NAME = "llama-3.1-8b-instant"  # Fast processing model
+TEMPERATURE = 0.1
+MAX_TOKENS = 2048
+
+# =========================
+# INSTALL DEPENDENCIES
+# =========================
+try:
+    import fitz  # PyMuPDF
+    print("✅ PyMuPDF available")
+except ImportError:
+    print("❌ Installing PyMuPDF...")
+    import sys
+    import subprocess
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pymupdf"])
+    import fitz
+    print("✅ PyMuPDF installed")
+
+try:
+    from groq import Groq
+    print("✅ Groq client available")
+except ImportError:
+    print("❌ Installing groq...")
+    import sys
+    import subprocess
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "groq"])
+    from groq import Groq
+    print("✅ Groq client installed")
+
+# =========================
+# SETUP GROQ CLIENT
+# =========================
+def setup_groq_client():
+    """Setup Groq API Client."""
+    groq_token = os.environ.get('GROQ_API_KEY')
+    
+    if not groq_token:
+        groq_token = input("🔑 Enter your Groq API Key: ").strip()
+        if not groq_token:
+            raise ValueError("❌ Missing Groq API Key!")
+    
+    return Groq(api_key=groq_token)
+
+# =========================
+# HELPER FUNCTIONS
+# =========================
+def sanitize_filename(name: str) -> str:
+    """Convert paper title to safe filename."""
+    name = re.sub(r'[<>:"/\\|?*]', '', name)
+    name = name.strip().replace(' ', '_')
+    name = re.sub(r'\+', '', name)
+    return name[:100]
+
+def normalize_author_name(name: str) -> str:
+    """Normalize author name for comparison (lowercase, no extra spaces)."""
+    return re.sub(r'\s+', ' ', name.strip().lower())
+
+def is_author_in_list(main_author: str, authors: List[str]) -> bool:
+    """Check if main author is in the authors list (case-insensitive, flexible matching)."""
+    main_normalized = normalize_author_name(main_author)
+    
+    for author in authors:
+        author_normalized = normalize_author_name(author)
+        # Check if names match (allow partial matches for "First Last" vs "Last, First")
+        if main_normalized in author_normalized or author_normalized in main_normalized:
+            return True
+        
+        # Check if last names match (common case)
+        main_parts = main_normalized.split()
+        author_parts = author_normalized.split()
+        if main_parts and author_parts:
+            main_last = main_parts[-1]
+            author_last = author_parts[-1]
+            if main_last == author_last and len(main_last) > 2:  # Avoid single letter matches
+                return True
+    
+    return False
+
+def save_paper_csv(paper_title: str, authors: List[str], abstract: str, 
+                   keywords: List[str], summary: str, output_dir: str) -> None:
+    """Save research paper metadata to CSV file."""
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        filename = sanitize_filename(paper_title) + ".csv"
+        filepath = os.path.join(output_dir, filename)
+        
+        keywords_str = ", ".join(keywords) if keywords else ""
+        
+        with open(filepath, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Title', 'Author', 'Abstract', 'Keywords', 'Summary'])
+            
+            for author in authors:
+                writer.writerow([paper_title, author, abstract, keywords_str, summary])
+        
+        print(f"      💾 Saved: {filename}")
+        return filepath
+    except Exception as e:
+        print(f"      ⚠ Failed to save CSV for '{paper_title}': {e}")
+        return None
+
+
+# =========================
+# LLM CALL USING GROQ
+# =========================
+def call_groq_extractor(client: Groq, text: str) -> Dict[str, Any]:
+    """Extract metadata using Groq LLM."""
+    try:
+        system_prompt = (
+            "You are an expert scholarly metadata extractor. "
+            "Return STRICT JSON ONLY with keys exactly: "
+            '{"title": str, "authors": [str], "abstract": str, "keywords": [str], "summary": str}. '
+            "Do not include any commentary or markdown fences."
+        )
+
+        user_prompt = f"""
+Extract from the following academic paper text.
+Return STRICT JSON with keys:
+"title", "authors", "abstract", "keywords", "summary".
+
+Paper text:
+\"\"\"{text[:8000]}\"\"\"
+Return ONLY JSON (no code fences).
+"""
+
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=MAX_TOKENS,
+            temperature=TEMPERATURE
+        )
+
+        raw = response.choices[0].message.content.strip()
+        # Remove markdown code fences if present
+        raw = re.sub(r"^```json\s*|```\s*$", "", raw, flags=re.IGNORECASE).strip()
+        data = json.loads(raw)
+        
+        return {
+            "title": data.get("title", "").strip(),
+            "authors": [a.strip() for a in data.get("authors", []) if a.strip()] if isinstance(data.get("authors"), list) else [],
+            "abstract": data.get("abstract", "").strip(),
+            "keywords": [k.strip() for k in data.get("keywords", []) if k.strip()] if isinstance(data.get("keywords"), list) else [],
+            "summary": data.get("summary", "").strip(),
+        }
+
+    except json.JSONDecodeError as e:
+        print(f"      ⚠ JSON parse failed: {e}")
+        return {"title": "", "authors": [], "abstract": "", "keywords": [], "summary": ""}
+    except Exception as e:
+        print(f"      ⚠ API call failed: {e}")
+        return {"title": "", "authors": [], "abstract": "", "keywords": [], "summary": ""}
+
+# =========================
+# TEXT CHUNKING & MERGING
+# =========================
+def chunk_text(text: str, chars: int = 10000, overlap: int = 500) -> List[str]:
+    chunks = []
+    n = len(text)
+    i = 0
+    while i < n:
+        end = min(i + chars, n)
+        chunks.append(text[i:end])
+        if end >= n:
+            break
+        i = end - overlap
+    return chunks
+
+def merge_extractions(extractions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not extractions:
+        return {"title": "", "authors": [], "abstract": "", "keywords": [], "summary": ""}
+
+    titles = [e["title"] for e in extractions if e.get("title")]
+    title = max(set(titles), key=titles.count) if titles else ""
+
+    author_lists = [tuple(e["authors"]) for e in extractions if e.get("authors")]
+    authors = list(max(set(author_lists), key=author_lists.count)) if author_lists else []
+
+    abstracts = [e["abstract"] for e in extractions if e.get("abstract")]
+    abstract = max(abstracts, key=len) if abstracts else ""
+
+    summaries = [e["summary"] for e in extractions if e.get("summary")]
+    summary = max(summaries, key=len) if summaries else ""
+
+    keywords = []
+    seen = set()
+    for e in extractions:
+        for k in e.get("keywords", []):
+            if k.lower() not in seen:
+                seen.add(k.lower())
+                keywords.append(k)
+
+    return {"title": title, "authors": authors, "abstract": abstract, "keywords": keywords, "summary": summary}
+
+# =========================
+# PDF EXTRACTION
+# =========================
+def extract_full_text_with_pymupdf(pdf_path: str) -> str:
+    """Extract all text from PDF."""
+    try:
+        doc = fitz.open(pdf_path)
+        text = "".join(page.get_text() for page in doc)
+        doc.close()
+        return text
+    except Exception as e:
+        print(f"      ❌ Failed to extract text from {pdf_path}: {e}")
+        return ""
+
+def extract_paper_metadata_from_pdf(client: Groq, pdf_path: str) -> Dict[str, Any]:
+    text = extract_full_text_with_pymupdf(pdf_path)
+    if not text:
+        return {"title": "", "authors": [], "abstract": "", "keywords": [], "summary": ""}
+
+    chunks = chunk_text(text)[:2]
+    results = []
+
+    for i, ch in enumerate(chunks):
+        print(f"      📄 Processing chunk {i+1}/{len(chunks)}")
+        result = call_groq_extractor(client, ch)
+        results.append(result)
+        time.sleep(0.5)  # Groq is fast, shorter delay
+
+    return merge_extractions(results)
+
+def ensure_main_author_included(authors: List[str], main_author: str) -> List[str]:
+    """
+    Ensure main author (from folder name) is included in the authors list.
+    If not found, add it at the beginning.
+    """
+    if not main_author or main_author == "[UNKNOWN AUTHOR]":
+        return authors
+    
+    if not authors:
+        return [main_author]
+    
+    # Check if main author is already in the list
+    if is_author_in_list(main_author, authors):
+        print(f"      ✓ Main author '{main_author}' found in extracted authors")
+        return authors
+    else:
+        print(f"      ⚠ Main author '{main_author}' NOT found in extracted authors")
+        print(f"      ➕ Adding '{main_author}' to the beginning of authors list")
+        return [main_author] + authors
+
+# =========================
+# MAIN
+# =========================
+def process_pdfs() -> None:
+    print("🔧 Setting up Groq client...")
+    client = setup_groq_client()
+    print("✅ Client ready!\n")
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    print(f"📁 Output directory: {OUTPUT_DIR}\n")
+
+    if not os.path.exists(RAW_DATA_DIR):
+        print(f"❌ Directory not found: {RAW_DATA_DIR}")
+        return
+
+    processed_count, failed_count = 0, 0
+    created_files = []
+
+    for root, _, files in os.walk(RAW_DATA_DIR):
+        pdfs = [f for f in files if f.lower().endswith(".pdf")]
+        if not pdfs:
+            continue
+
+        # Extract main author from folder name
+        main_author = os.path.basename(root)
+        
+        print(f"📂 Processing folder: {root}")
+        print(f"   👤 Main Author (from folder): {main_author}")
+        print(f"   Found {len(pdfs)} PDFs\n")
+
+        for fname in pdfs:
+            pdf_path = os.path.join(root, fname)
+            print(f"   🔍 Processing: {fname}")
+            try:
+                meta = extract_paper_metadata_from_pdf(client, pdf_path)
+
+                title = meta["title"] or Path(pdf_path).stem
+                authors = meta.get("authors") or []
+                abstract = meta.get("abstract", "")
+                keywords = meta.get("keywords", [])
+                summary = meta.get("summary", "")
+
+                # ✅ ENSURE MAIN AUTHOR IS INCLUDED
+                authors = ensure_main_author_included(authors, main_author)
+                
+                # If still no authors, use main author as fallback
+                if not authors:
+                    authors = [main_author if main_author else "[UNKNOWN AUTHOR]"]
+
+                print(f"      ✅ Extracted metadata:")
+                print(f"         Title: {title[:60]}...")
+                print(f"         Authors: {', '.join(authors)}")
+                print(f"         Keywords: {len(keywords)} found")
+                print(f"         Abstract length: {len(abstract)}")
+                print(f"         Summary length: {len(summary)}")
+
+                csv_path = save_paper_csv(title, authors, abstract, keywords, summary, OUTPUT_DIR)
+
+                if csv_path:
+                    created_files.append(os.path.basename(csv_path))
+                    processed_count += 1
+                else:
+                    failed_count += 1
+
+                print()
+            except Exception as e:
+                failed_count += 1
+                print(f"      ❌ Failed: {e}\n")
+
+    print("\n" + "=" * 70)
+    print("✅ PROCESSING COMPLETE!")
+    print("=" * 70)
+    print(f"   📊 Total PDFs processed: {processed_count}")
+    print(f"   ❌ Failed: {failed_count}")
+    print(f"   📁 CSV files saved to: {OUTPUT_DIR}")
+    print(f"   📄 Total CSV files created: {len(created_files)}")
+    print("=" * 70)
+    if created_files:
+        print("\n📋 Created CSV files:")
+        for f in created_files:
+            print(f"   • {f}")
+
+# ✅ Run directly in VS Code
+if __name__ == "__main__":
+    print("🚀 Starting Research Paper CSV Extraction (Groq API)\n")
+    print("📌 Main author will be extracted from folder name")
+    print("📌 If not found in extracted authors, it will be added automatically\n")
+    process_pdfs()
