@@ -3,6 +3,16 @@
 An intelligent system that recommends suitable reviewers for research papers using semantic similarity matching powered by LLMs and sentence transformers.
 
 ---
+## 👥 Team Members
+
+| Name                  | Roll Number   |
+|------------------------|---------------|
+| Donta Chaitanya Goud   | SE22UARI047   |
+| Vasu Deshmukh          | SE22UECM084   |
+| Ch. Vamsi Krishna      | SE22UARI039   |
+| G. Rohan               | SE22UCSE312   |
+
+---
 
 ## 🎯 Overview
 
@@ -655,13 +665,8 @@ By combining LLM-powered extraction with Sentence-BERT embeddings:
 - ✅ **Fast recommendations** - pre-computed embeddings + efficient cosine similarity
 
 This transforms reviewer recommendation from **keyword matching** to **intelligent semantic understanding**.
-
----
-
-
-
 ---
 
 ## 📧 Contact
 
-For questions or issues, please open an issue on GitHub or contact [your-email@example.com]
+For questions or issues contact [se22uari047@mahindrauniversity.edu.in]
