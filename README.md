@@ -26,6 +26,75 @@ This system automatically extracts metadata from research papers and matches the
 
 ---
 
+## 🧠 **Why Sentence-BERT Embeddings?**
+
+This system uses **Sentence-BERT (SBERT)** embeddings instead of traditional text representation methods like TF-IDF or Bag-of-Words for semantic matching.
+
+### **Limitations of Traditional Methods (TF-IDF)**
+
+| Issue | Impact on Reviewer Recommendation |
+|-------|-----------------------------------|
+| **No Semantic Understanding** | Cannot recognize that "neural network" and "deep learning model" describe similar concepts. Matching relies only on exact word overlap. |
+| **High-Dimensional Sparse Vectors** | Creates vectors with thousands of dimensions (vocabulary size), mostly zeros. This makes similarity search slow and memory-intensive. |
+| **Frequency ≠ Meaning** | Weights words by frequency, not contextual importance. Two papers discussing the same concept with different terminology will have zero similarity. |
+| **Poor Scalability** | Adding new reviewers or papers requires recomputing the entire vocabulary and all vectors. Not practical for growing datasets. |
+| **No Synonym/Paraphrase Handling** | If a reviewer works on "AI in medical imaging" and a paper discusses "deep learning for radiology," TF-IDF sees no connection despite semantic similarity. |
+
+### **Why Sentence-BERT Is Superior**
+
+| Advantage | Benefit |
+|-----------|---------|
+| 🎯 **Semantic Understanding** | Captures the **meaning** of entire sentences, understanding context, synonyms, and paraphrases. Perfect for matching research topics. |
+| 🚀 **Dense & Compact** | Produces low-dimensional vectors (384-768 dims) that are efficient for storage and computation. |
+| 📈 **Highly Scalable** | New papers/reviewers can be embedded independently without recomputing existing embeddings. |
+| 🔍 **Context-Aware** | Understands word order and context (e.g., "bank account" vs "river bank"), crucial for technical papers. |
+| 🎓 **Pre-trained for Similarity** | Fine-tuned on Natural Language Inference and Semantic Textual Similarity datasets - optimized specifically for meaning-based comparison. |
+
+### **Why Cosine Similarity Is Sufficient for SBERT Embeddings**
+
+**Cosine similarity** is the ideal distance metric for SBERT embeddings, and here's why:
+
+#### **1. Unit-Normalized Embeddings**
+- SBERT embeddings are **L2-normalized** by default (unit vectors on a hypersphere)
+- This means all embeddings have the same magnitude (length = 1)
+- When vectors are normalized, **cosine similarity = dot product**, making computation extremely fast
+
+#### **2. Semantic Orientation Matters, Not Magnitude**
+- In SBERT's embedding space, **direction captures meaning**, not length
+- Two papers about "deep learning" will point in similar directions (high cosine similarity)
+- Papers about unrelated topics will point in different directions (low cosine similarity)
+- Cosine similarity perfectly captures this angular relationship
+
+#### **3. Computational Efficiency**
+```python
+# For normalized vectors:
+cosine_similarity(A, B) = dot(A, B) / (||A|| × ||B||)
+                        = dot(A, B) / (1 × 1)  # Since normalized
+                        = dot(A, B)  # Simple dot product!
+```
+- This reduces complexity from O(n) division operations to pure matrix multiplication
+- Enables efficient batch processing of thousands of reviewers
+
+#### **4. Scale-Invariant Comparison**
+- Cosine similarity (range: -1 to 1) is independent of vector magnitude
+- Two papers with different text lengths will have embeddings of the same "size"
+- This ensures fair comparison regardless of abstract length or keyword count
+
+#### **5. Why Not Euclidean Distance?**
+For normalized vectors, Euclidean distance and cosine similarity are mathematically related, but cosine is preferred because:
+- **Cosine similarity** directly measures angular similarity (0° = identical, 90° = orthogonal)
+- **More interpretable**: 0.95 similarity is clearly "very similar"
+- **SBERT is trained** to optimize for cosine similarity during fine-tuning
+
+#### **6. Proven Effectiveness**
+- SBERT's pre-training explicitly uses **cosine similarity loss functions**
+- The model learns to place semantically similar sentences close together in *angular space*
+- Using cosine similarity aligns with how the model was trained
+
+**In Summary**: Cosine similarity is not just "sufficient" — it's the **mathematically optimal** metric for SBERT embeddings, combining speed, interpretability, and alignment with the model's training objective.
+
+---
+
 ## 🏗️ System Architecture
 
 ```
@@ -38,7 +107,7 @@ This system automatically extracts metadata from research papers and matches the
 ┌─────────────────────────────────────────────────────────────┐
 │              STEP 1: Feature Extraction                      │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │  Script: extract_papers.py                           │   │
+│  │  Script: llm_extraction.py                           │   │
 │  │  • Extract text from PDFs (PyMuPDF)                  │   │
 │  │  • LLM extraction (Groq API)                         │   │
 │  │  • Output: Individual CSV files per paper            │   │
@@ -61,7 +130,7 @@ This system automatically extracts metadata from research papers and matches the
 ┌─────────────────────────────────────────────────────────────┐
 │              STEP 3: Data Cleaning                          │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │  Script: clean_authors.py                            │   │
+│  │  Script: data_clean.py                               │   │
 │  │  • Remove noise patterns                             │   │
 │  │  • Filter invalid authors                            │   │
 │  │                                                      │   │
@@ -73,7 +142,7 @@ This system automatically extracts metadata from research papers and matches the
 ┌─────────────────────────────────────────────────────────────┐
 │              STEP 4: Embedding Generation                    │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │  Script: generate_embeddings.py                      │   │
+│  │  Script: embeddings.py                      │   │
 │  │  • Load sentence transformer model                   │   │
 │  │  • Generate embeddings for:                          │   │
 │  │    - Titles                                          │   │
@@ -499,7 +568,7 @@ STEP 6: Verifying saved embeddings...
 
 ---
 
-
+## 🚀 Running the Recommendation System
 
 ### Using the Web Interface
 
@@ -539,6 +608,60 @@ MODEL_NAME = 'all-MiniLM-L6-v2'  # Fast (default)
 # MODEL_NAME = 'all-MiniLM-L12-v2'  # Balanced
 ```
 
+---
+
+## 📚 Technical Deep Dive
+
+### **Comparison: TF-IDF vs Sentence-BERT**
+
+| Feature | TF-IDF | Sentence-BERT |
+|---------|--------|---------------|
+| Captures context | ❌ No | ✅ Yes |
+| Handles synonyms/paraphrases | ❌ No | ✅ Yes |
+| Vector type | Sparse (vocab-based) | Dense (contextual) |
+| Dimensionality | ~10,000+ dims | 384-768 dims |
+| Scalability (add new data) | ❌ Must recompute all | ✅ Independent embeddings |
+| Suitable for semantic similarity | ❌ Keyword-level only | ✅ Meaning-level |
+| Computational efficiency | ❌ High-dimensional | ✅ Compact & fast |
+| Quality of matches | Surface-level | Deep semantic |
+
+### **Why Cosine Similarity Works Best**
+
+For SBERT embeddings, cosine similarity is mathematically optimal because:
+
+1. **Unit-normalized vectors**: All embeddings have length = 1, making `cosine_similarity = dot_product`
+2. **Direction = Meaning**: Angular distance captures semantic similarity
+3. **Computational efficiency**: Reduces to fast matrix multiplication
+4. **Scale-invariant**: Fair comparison regardless of text length
+5. **Aligned with training**: SBERT is trained using cosine similarity loss
+
+**Mathematical relationship for normalized vectors:**
+```
+cosine_similarity(A, B) = dot(A, B) / (||A|| × ||B||)
+                        = dot(A, B) / (1 × 1)
+                        = dot(A, B)
+```
+
+---
+
+## 🎓 Project Impact
+
+By combining LLM-powered extraction with Sentence-BERT embeddings:
+
+- ✅ **Understands meaning**, not just keywords
+- ✅ **Accurately matches** reviewers to papers semantically
+- ✅ **Scales efficiently** - add reviewers without reprocessing
+- ✅ **Handles paraphrases** - "AI in medical imaging" matches "deep learning for radiology"
+- ✅ **Fast recommendations** - pre-computed embeddings + efficient cosine similarity
+
+This transforms reviewer recommendation from **keyword matching** to **intelligent semantic understanding**.
+
+---
 
 
 
+---
+
+## 📧 Contact
+
+For questions or issues, please open an issue on GitHub or contact [your-email@example.com]
