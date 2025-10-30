@@ -2,6 +2,8 @@
 
 An intelligent system that recommends suitable reviewers for research papers using semantic similarity matching powered by LLMs and sentence transformers.
 
+Link for streamlit app : https://applied-ai-tcgqc95mnlpo7euljcbwwu.streamlit.app/
+
 ---
 ## 👥 Team Members
 
